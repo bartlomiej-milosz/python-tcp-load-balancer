@@ -1,93 +1,94 @@
 import logging
 import socket
-from logging import Logger
+import time
 from typing import Callable, override
-from app.tcp.server import TCPServer
-from app.http.models import HTTPRequest, HTTPResponse
-from app.http.protocol import build_response, parse_request
 
-logger: Logger = logging.getLogger(__name__)
+from app.http.models import HTTPRequest, HTTPResponse
+from app.http.protocol import (
+    HTTPError,
+    build_response,
+    content_length,
+    parse_headers,
+    parse_request,
+)
+from app.tcp.server import TCPServer
+
+logger = logging.getLogger(__name__)
 
 
 class HTTPServer(TCPServer):
-    def __init__(self, host: str = "127.0.0.1", port: int = 8080) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8080,
+        *,
+        max_header_bytes: int = 16 * 1024,
+        max_body_bytes: int = 1024 * 1024,
+        request_timeout: float = 10.0,
+        write_timeout: float = 5.0,
+    ) -> None:
+        if max_header_bytes < 4 or max_body_bytes < 0:
+            raise ValueError("Invalid HTTP size limits")
+        if request_timeout <= 0 or write_timeout <= 0:
+            raise ValueError("HTTP timeouts must be positive")
         super().__init__(host, port)
+        self.max_header_bytes = max_header_bytes
+        self.max_body_bytes = max_body_bytes
+        self.request_timeout = request_timeout
+        self.write_timeout = write_timeout
         self.routes: dict[tuple[str, str], Callable[[HTTPRequest], HTTPResponse]] = {}
 
     def add_route(
         self, method: str, path: str, handler: Callable[[HTTPRequest], HTTPResponse]
-    ):
-        """Registers a handler function for a specific HTTP method and path."""
+    ) -> None:
+        """Register routes before starting the server."""
         self.routes[(method, path)] = handler
 
-    def _read_until_headers_complete(self, client_socket: socket.socket) -> bytes:
-        """Reads from the client socket until the HTTP header separator (\\r\\n\\r\\n) is found."""
-        data: bytes = b""
-        while b"\r\n\r\n" not in data:
-            chunk: bytes = client_socket.recv(self.BUFFER_SIZE)
-            if not chunk:
-                break
-            data += chunk
-        return data
-
-    def _extract_content_length(self, headers_raw: bytes) -> int:
-        """Parses HTTP headers to extract the Content-Length value, defaulting to 0 if not found."""
-        headers_text: str = headers_raw.decode("utf-8", errors="ignore")
-        for line in headers_text.split("\r\n")[1:]:
-            if ":" in line:
-                key, val = line.split(":", 1)
-                if key.strip().lower() == "content-length":
-                    try:
-                        return int(val.strip())
-                    except ValueError:
-                        return 0
-        return 0
-
-    def _read_body_by_content_length(
-        self, client_socket: socket.socket, body_raw: bytes, content_length: int
-    ) -> bytes:
-        """Reads the remaining body bytes from the socket based on the extracted Content-Length."""
-        while len(body_raw) < content_length:
-            chunk: bytes = client_socket.recv(self.BUFFER_SIZE)
-            if not chunk:
-                break
-            body_raw += chunk
-        return body_raw
-
     def _receive(self, client_socket: socket.socket) -> bytes:
-        """Reads the complete HTTP request (headers and body) from the client socket."""
-        data: bytes = self._read_until_headers_complete(client_socket)
+        """Read bounded framing under one deadline, including fragmented bodies."""
+        deadline = time.monotonic() + self.request_timeout
 
-        if b"\r\n\r\n" not in data:
-            return data
+        def receive(size: int) -> bytes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Request deadline exceeded")
+            client_socket.settimeout(remaining)
+            chunk = client_socket.recv(size)
+            if not chunk:
+                raise HTTPError()
+            return chunk
 
-        headers_raw, initial_body_raw = data.split(b"\r\n\r\n", 1)
-        content_length: int = self._extract_content_length(headers_raw)
-
-        full_body_raw: bytes = self._read_body_by_content_length(
-            client_socket, initial_body_raw, content_length
-        )
-
-        return headers_raw + b"\r\n\r\n" + full_body_raw
+        data = bytearray()
+        while b"\r\n\r\n" not in data:
+            if len(data) >= self.max_header_bytes:
+                raise HTTPError(431)
+            data.extend(
+                receive(min(self.BUFFER_SIZE, self.max_header_bytes - len(data)))
+            )
+        head, _, initial_body = bytes(data).partition(b"\r\n\r\n")
+        length = content_length(parse_headers(head).headers)
+        if length > self.max_body_bytes:
+            raise HTTPError(413)
+        body = bytearray(initial_body[:length])
+        while len(body) < length:
+            body.extend(receive(min(self.BUFFER_SIZE, length - len(body))))
+        return head + b"\r\n\r\n" + bytes(body)
 
     def _send_response(
         self, client_socket: socket.socket, response: HTTPResponse
     ) -> None:
-        """Encodes and sends an HTTPResponse object back to the client."""
-        encoded_response: bytes = build_response(response)
-        client_socket.sendall(encoded_response)
+        client_socket.settimeout(self.write_timeout)
+        client_socket.sendall(build_response(response))
 
     def _dispatch_request(self, request: HTTPRequest) -> HTTPResponse:
-        """Routes the parsed HTTPRequest to the appropriate handler and returns an HTTPResponse."""
-        route_key: tuple[str, str] = (request.method, request.path)
-        if route_key not in self.routes:
+        handler = self.routes.get((request.method, request.path))
+        if handler is None:
             return HTTPResponse(404, "Not Found", "404 Page Not Found")
-
-        handler: Callable[[HTTPRequest], HTTPResponse] = self.routes[route_key]
         try:
             return handler(request)
-        except Exception as e:
-            logger.error("Handler error on %s: %s", request.path, e)
+        except Exception:
+            # Application handlers are the deliberate exception boundary.
+            logger.exception("Handler error on %s", request.path)
             return HTTPResponse(
                 500, "Internal Server Error", "500 Internal Server Error"
             )
@@ -96,18 +97,20 @@ class HTTPServer(TCPServer):
     def _process_request(
         self, client_socket: socket.socket, address: tuple[str, int]
     ) -> None:
-        """Main entrypoint for processing an incoming client connection. Receives, parses, dispatches, and responds."""
-        data: bytes = self._receive(client_socket)
-
         try:
-            request: HTTPRequest = parse_request(data)
-        except Exception as e:
-            logger.error("Failed to parse request: %s", e)
-            self._send_response(
-                client_socket, HTTPResponse(400, "Bad Request", "400 Bad Request")
+            request = parse_request(self._receive(client_socket))
+        except HTTPError as exc:
+            response = HTTPResponse(
+                exc.status_code, exc.status_text, f"{exc.status_code} {exc.status_text}"
             )
-            return
-
-        logger.info("Received %s %s from %s:%s", request.method, request.path, *address)
-        response: HTTPResponse = self._dispatch_request(request)
-        self._send_response(client_socket, response)
+        except TimeoutError:
+            response = HTTPResponse(408, "Request Timeout", "408 Request Timeout")
+        else:
+            logger.info(
+                "Received %s %s from %s:%s", request.method, request.path, *address
+            )
+            response = self._dispatch_request(request)
+        try:
+            self._send_response(client_socket, response)
+        except OSError:
+            logger.debug("Client %s:%s closed before response completed", *address)

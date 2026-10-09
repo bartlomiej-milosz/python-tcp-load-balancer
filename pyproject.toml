@@ -3,6 +3,8 @@ name = "python-tcp-load-balancer"
 version = "0.1.0"
 description = "Educational TCP load balancer in Python with round-robin routing, a TCP proxy, and a minimal HTTP server."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = []
 

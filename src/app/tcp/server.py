@@ -46,11 +46,15 @@ class TCPServer(ABC):
         ...
 
     @staticmethod
-    def _close_socket(connection: socket.socket) -> None:
+    def _shutdown_socket(connection: socket.socket) -> None:
         try:
             connection.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+
+    @staticmethod
+    def _close_socket(connection: socket.socket) -> None:
+        TCPServer._shutdown_socket(connection)
         connection.close()
 
     def _track_socket(self, connection: socket.socket) -> bool:
@@ -129,14 +133,18 @@ class TCPServer(ABC):
         with self._lifecycle_lock:
             connections = tuple(self._connections)
             workers = tuple(self._workers)
+        # Preserve descriptors until workers leave I/O: close racing with a new
+        # timed recv/select may not wake that operation on every platform.
         for connection in connections:
-            self._close_socket(connection)
+            self._shutdown_socket(connection)
         current = threading.current_thread()
         for worker in workers:
             if worker is not current:
                 worker.join(max(0, deadline - time.monotonic()))
         if self._serve_thread is not None and self._serve_thread is not current:
             self._serve_thread.join(max(0, deadline - time.monotonic()))
+        for connection in connections:
+            connection.close()
         if any(worker.is_alive() and worker is not current for worker in workers):
             logger.warning("Shutdown deadline exceeded; a handler is still running")
 

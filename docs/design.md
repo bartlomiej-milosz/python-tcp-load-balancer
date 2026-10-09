@@ -4,7 +4,7 @@
 
 `TCPServer` owns the listener and starts one non-daemon worker per accepted client.
 The worker closes its client socket in `finally`. Active sockets and workers are
-registered under a lifecycle lock so `stop()` can close them and join threads.
+registered under a lifecycle lock so `stop()` can interrupt them and join threads.
 Listener startup also has a cleanup boundary covering bind/listen failures.
 Instances are single-use; calling `stop()` repeatedly is safe.
 
@@ -41,9 +41,12 @@ only reports readiness; it does not make `sendall` non-blocking. A write can del
 reading the opposite direction until it finishes or times out. Hostname resolution
 uses the system resolver and is not bounded by the TCP socket timeout.
 
-`stop()` marks shutdown, closes the listener and registered sockets (including
-backend sockets), and joins threads within one deadline. Socket closure wakes
-blocked readers and writers. Entry-point signal handlers only request shutdown,
+`stop()` marks shutdown, closes the listener, and shuts down both directions of
+registered streams (including backend sockets). Workers keep their descriptors
+until their own cleanup closes them; this avoids a close racing with entry into
+a timed receive/select operation. Threads are joined within one deadline, after
+which any remaining streams are closed as a fallback. Shutdown wakes readers
+and writers. Entry-point signal handlers only request shutdown,
 avoiding a lock acquisition inside interrupted code; the accept loop notices the
 request within its 0.2-second polling interval and cleans up. An arbitrary custom
 handler cannot be killed safely by Python; a worker exceeding the join budget is

@@ -188,3 +188,32 @@ def test_http_request_timeout_returns_408():
         with connect(server) as client:
             client.sendall(b"G")
             assert read_all(client).startswith(b"HTTP/1.1 408 Request Timeout")
+
+
+def test_stop_keeps_descriptor_valid_until_worker_finishes_reading():
+    entered = threading.Event()
+    resume = threading.Event()
+    observed = []
+
+    class PausedReader(TCPServer):
+        def _process_request(self, client_socket, address):
+            entered.set()
+            assert resume.wait(2)
+            # A late read must observe shutdown as EOF, not a prematurely closed fd.
+            observed.append(client_socket.fileno())
+            observed.append(client_socket.recv(1))
+
+    with running_server(PausedReader(port=0)) as server, connect(server) as client:
+        assert entered.wait(2)
+        stopper = threading.Thread(target=server.stop)
+        stopper.start()
+        try:
+            assert client.recv(1) == b""
+            resume.set()
+            stopper.join(3)
+            assert not stopper.is_alive()
+            assert len(observed) == 2 and observed[0] >= 0 and observed[1] == b""
+        finally:
+            resume.set()
+            stopper.join(3)
+            assert not stopper.is_alive()

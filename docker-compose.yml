@@ -1,23 +1,31 @@
 services:
   http-server-1:
     build: .
-    command: ["python", "src/app/run_http_server.py", "8080"]
-    # Internal port is 8080, we don't expose it to the host machine
+    command: ["python", "-m", "app.run_http_server", "8080"]
+    environment:
+      HOST: 0.0.0.0
+      BACKEND_ID: backend-1
 
   http-server-2:
     build: .
-    command: ["python", "src/app/run_http_server.py", "8080"]
+    command: ["python", "-m", "app.run_http_server", "8080"]
+    environment:
+      HOST: 0.0.0.0
+      BACKEND_ID: backend-2
 
   http-server-3:
     build: .
-    command: ["python", "src/app/run_http_server.py", "8080"]
+    command: ["python", "-m", "app.run_http_server", "8080"]
+    environment:
+      HOST: 0.0.0.0
+      BACKEND_ID: backend-3
 
   load-balancer:
     build: .
-    command: ["python", "src/app/run_load_balancer.py"]
+    command: ["python", "-m", "app.run_load_balancer"]
     environment:
-      # Tell the load balancer to route to our 3 internal HTTP servers
-      - BACKEND_SERVERS=http-server-1:8080,http-server-2:8080,http-server-3:8080
+      HOST: 0.0.0.0
+      BACKEND_SERVERS: http-server-1:8080,http-server-2:8080,http-server-3:8080
     depends_on:
       - http-server-1
       - http-server-2
@@ -25,13 +33,12 @@ services:
 
   proxy:
     build: .
-    command: ["python", "src/app/run_proxy_server.py"]
+    command: ["python", "-m", "app.run_proxy_server"]
     environment:
-      # Tell proxy to forward traffic to the load balancer
-      - TARGET_HOST=load-balancer
-      - TARGET_PORT=8001
+      HOST: 0.0.0.0
+      TARGET_HOST: load-balancer
+      TARGET_PORT: "8001"
     ports:
-      # Map internal port 8000 to external port 8000
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       - load-balancer

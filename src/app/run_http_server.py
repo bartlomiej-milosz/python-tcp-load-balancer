@@ -1,57 +1,67 @@
-import logging
 import json
+import logging
+import os
 import sys
-from app.http.server import HTTPServer
+from typing import Callable
+
 from app.http.models import HTTPRequest, HTTPResponse
-
-logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s"
-)
+from app.http.server import HTTPServer
 
 
-def get_api_status(port: int):
+def get_api_status(
+    port: int, backend_id: str | None = None
+) -> Callable[[HTTPRequest], HTTPResponse]:
     def api_status(request: HTTPRequest) -> HTTPResponse:
-        """Health check endpoint returning the status and version of the API."""
         data = {
             "status": "ok",
             "version": "1.0",
+            "backend_id": backend_id if backend_id is not None else f"backend-{port}",
             "message": f"Backend API is running on port {port}",
         }
         return HTTPResponse(
-            status_code=200,
-            status_text="OK",
-            body=json.dumps(data),
-            headers={"Content-Type": "application/json"},
+            200, "OK", json.dumps(data), {"Content-Type": "application/json"}
         )
 
     return api_status
 
 
 def api_users(request: HTTPRequest) -> HTTPResponse:
-    """Mock endpoint returning a static list of system users."""
-    data = {"users": ["kate", "admin", "guest"]}
+    """Return the original demonstration users."""
     return HTTPResponse(
-        status_code=200,
-        status_text="OK",
-        body=json.dumps(data),
-        headers={"Content-Type": "application/json"},
+        200,
+        "OK",
+        json.dumps({"users": ["kate", "admin", "guest"]}),
+        {"Content-Type": "application/json"},
     )
 
 
 def api_echo(request: HTTPRequest) -> HTTPResponse:
-    """Echo endpoint that returns the received request body exactly as it was sent."""
+    """Echo a UTF-8 text body with the normalized request content type."""
     return HTTPResponse(
-        status_code=200,
-        status_text="OK",
-        body=request.body,
-        headers={"Content-Type": request.headers.get("Content-Type", "text/plain")},
+        200,
+        "OK",
+        request.body,
+        {
+            "Content-Type": request.headers.get(
+                "content-type", "text/plain; charset=utf-8"
+            )
+        },
     )
 
 
-if __name__ == "__main__":
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    )
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
-    server = HTTPServer(host="0.0.0.0", port=port)
-    server.add_route("GET", "/api/status", get_api_status(port))
+    server = HTTPServer(host=os.environ.get("HOST", "127.0.0.1"), port=port)
+    server.add_route(
+        "GET", "/api/status", get_api_status(port, os.environ.get("BACKEND_ID"))
+    )
     server.add_route("GET", "/api/users", api_users)
     server.add_route("POST", "/api/echo", api_echo)
-    server.start()
+    server.run()
+
+
+if __name__ == "__main__":
+    main()

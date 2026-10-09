@@ -1,7 +1,7 @@
 [project]
-name = "raw-network-stack"
+name = "python-tcp-load-balancer"
 version = "0.1.0"
-description = "Raw TCP Network Stack including HTTP Server, Reverse Proxy, and Load Balancer"
+description = "Educational TCP load balancer in Python with round-robin routing, a TCP proxy, and a minimal HTTP server."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = []

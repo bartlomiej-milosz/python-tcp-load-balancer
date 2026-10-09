@@ -2,32 +2,30 @@ name: CI Pipeline
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
 
 jobs:
   test:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup uv
-      uses: astral-sh/setup-uv@v2
-      with:
-        enable-cache: true
-        cache-dependency-glob: "uv.lock"
-
-    - name: Install Python 3.13
-      run: uv python install 3.13
-
-    - name: Run Ruff (Linter)
-      run: uv run ruff check
-
-    - name: Run Ty (Type Checker)
-      run: uv run ty check
-
-    - name: Run Pytest (Unit Tests)
-      run: uv run pytest
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Install Python 3.13
+        run: uv python install 3.13
+      - name: Install locked development environment
+        run: uv sync --locked
+      - name: Lint
+        run: uv run --frozen ruff check
+      - name: Check formatting
+        run: uv run --frozen ruff format --check
+      - name: Check types
+        run: uv run --frozen ty check
+      - name: Run unit and loopback integration tests
+        run: uv run --frozen pytest -W error

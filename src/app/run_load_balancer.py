@@ -1,23 +1,44 @@
 import logging
 import os
+
 from app.load_balancer.server import LoadBalancerServer
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-)
-logger = logging.getLogger(__name__)
+
+def parse_backends(value: str) -> list[tuple[str, int]]:
+    """Parse the demo's IPv4/hostname host:port configuration."""
+    try:
+        backends = []
+        for entry in value.split(","):
+            host, port = entry.strip().split(":")
+            if not port.isascii() or not port.isdecimal():
+                raise ValueError("Port must be decimal")
+            backends.append((host, int(port)))
+        return backends
+    except ValueError as exc:
+        raise ValueError(
+            "BACKEND_SERVERS must contain comma-separated host:port entries"
+        ) from exc
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    try:
+        backends = parse_backends(
+            os.environ.get(
+                "BACKEND_SERVERS", "127.0.0.1:8081,127.0.0.1:8082,127.0.0.1:8083"
+            )
+        )
+        server = LoadBalancerServer(
+            host=os.environ.get("HOST", "127.0.0.1"),
+            port=8001,
+            backend_servers=backends,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Invalid backend configuration: {exc}") from exc
+    server.run()
+
 
 if __name__ == "__main__":
-    backends_env = os.environ.get("BACKEND_SERVERS")
-    if backends_env:
-        # Expected format: "host1:port1,host2:port2"
-        backends = []
-        for server in backends_env.split(","):
-            host, port = server.split(":")
-            backends.append((host, int(port)))
-    else:
-        backends = [("127.0.0.1", 8081), ("127.0.0.1", 8082), ("127.0.0.1", 8083)]
-    
-    logger.info("Starting Load Balancer on port 8001 (routing to %s)...", backends)
-    lb = LoadBalancerServer(host="0.0.0.0", port=8001, backend_servers=backends)
-    lb.start()
+    main()

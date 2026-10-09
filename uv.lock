@@ -159,7 +159,7 @@ wheels = [
 ]
 
 [[package]]
-name = "raw-network-stack"
+name = "python-tcp-load-balancer"
 version = "0.1.0"
 source = { virtual = "." }
 

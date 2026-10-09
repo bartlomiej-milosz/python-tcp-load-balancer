@@ -70,7 +70,7 @@ def test_utf8_response_framing_is_authoritative_and_does_not_mutate():
     response = HTTPResponse(
         200,
         "OK",
-        "Zażółć 🌍",
+        "Hello 🌍",
         {
             "content-length": "1",
             "CONTENT-LENGTH": "2",

@@ -63,7 +63,7 @@ def test_http_request_and_utf8_response_through_proxy():
     with running_server(http):
         proxy = ProxyServer(port=0, target_port=http.port)
         with running_server(proxy), connect(proxy) as client:
-            body = "Zażółć 🌍".encode()
+            body = "Hello 🌍".encode()
             client.sendall(
                 f"POST /echo HTTP/1.1\r\ncontent-length: {len(body)}\r\n\r\n".encode()
                 + body

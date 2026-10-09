@@ -6,8 +6,12 @@ from app.proxy.server import ProxyServer
 
 
 @pytest.fixture
-def get_proxy_server() -> ProxyServer:
-    return ProxyServer(target_host="127.0.0.1", target_port=8080)
+def get_proxy_server():
+    server = ProxyServer(target_host="127.0.0.1", target_port=8080)
+    try:
+        yield server
+    finally:
+        server.stop()
 
 
 @pytest.fixture
@@ -43,6 +47,7 @@ class TestProxyServer:
 
         assert result is False
         mock_dest.sendall.assert_not_called()
+        mock_dest.shutdown.assert_called_once_with(socket.SHUT_WR)
 
     def test_process_request_handles_connection_refused_gracefully(
         self,
@@ -59,7 +64,36 @@ class TestProxyServer:
 
         get_proxy_server._process_request(mock_client_socket, ("127.0.0.1", 54321))
 
-        mock_logger.error.assert_called_once_with(
-            "Backend server %s:%s is down! Connection refused.", "127.0.0.1", 8080
-        )
+        mock_logger.debug.assert_called_once()
+        mock_client_socket.sendall.assert_not_called()
         mock_select.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error", [TimeoutError(), ConnectionResetError(), BrokenPipeError()]
+)
+def test_forwarding_network_errors_end_connection(
+    get_proxy_server, mock_client_socket, mocker, error
+):
+    socket_class = mocker.patch("app.proxy.server.socket.socket")
+    target = socket_class.return_value.__enter__.return_value
+    mocker.patch(
+        "app.proxy.server.select.select", return_value=([mock_client_socket], [], [])
+    )
+    mock_client_socket.recv.return_value = b"bytes"
+    target.sendall.side_effect = error
+    get_proxy_server._process_request(mock_client_socket, ("127.0.0.1", 1))
+    target.settimeout.assert_any_call(get_proxy_server.connect_timeout)
+    target.settimeout.assert_any_call(get_proxy_server.write_timeout)
+    assert not get_proxy_server._connections
+
+
+def test_backend_connect_timeout_is_controlled(
+    get_proxy_server, mock_client_socket, mocker
+):
+    socket_class = mocker.patch("app.proxy.server.socket.socket")
+    target = socket_class.return_value.__enter__.return_value
+    target.connect.side_effect = TimeoutError()
+    get_proxy_server._process_request(mock_client_socket, ("127.0.0.1", 1))
+    mock_client_socket.sendall.assert_not_called()
+    assert not get_proxy_server._connections

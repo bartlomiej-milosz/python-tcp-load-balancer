@@ -1,153 +1,78 @@
 import socket
-import pytest
-from typing import override
 from unittest.mock import MagicMock
-from pytest_mock import MockerFixture
+
+import pytest
+
 from app.tcp.server import TCPServer
 
 
-@pytest.fixture
-def get_tcp_server() -> TCPServer:
-    class ConcreteTCPServer(TCPServer):
-        @override
-        def _process_request(
-            self, client_socket: socket.socket, address: tuple[str, int]
-        ) -> None: ...
-
-    return ConcreteTCPServer()
+class ConcreteTCPServer(TCPServer):
+    def _process_request(self, client_socket, address):
+        pass
 
 
 @pytest.fixture
-def started_server(
-    get_tcp_server, mock_server_socket, mock_client_socket, client_address, mocker
-):
-    get_tcp_server.server_socket = mock_server_socket
-    mocker.patch.object(get_tcp_server, "_handle_client")
-    mock_server_socket.accept.side_effect = [
-        (mock_client_socket, client_address),
-        KeyboardInterrupt(),
-    ]
-    return get_tcp_server
+def get_tcp_server():
+    server = ConcreteTCPServer()
+    try:
+        yield server
+    finally:
+        server.stop()
 
 
-@pytest.fixture
-def mock_client_socket(mocker: MockerFixture) -> MagicMock:
-    return mocker.MagicMock(spec=socket.socket)
+@pytest.mark.parametrize(
+    "error", [None, ConnectionResetError(), BrokenPipeError(), TimeoutError()]
+)
+def test_handle_client_always_closes_socket(get_tcp_server, mocker, error):
+    client = MagicMock(spec=socket.socket)
+    mocker.patch.object(get_tcp_server, "_process_request", side_effect=error)
+    get_tcp_server._handle_client(client, ("127.0.0.1", 54321))
+    client.close.assert_called_once()
 
 
-@pytest.fixture
-def mock_server_socket(mocker: MockerFixture) -> MagicMock:
-    return mocker.MagicMock(spec=socket.socket)
+def test_unexpected_programming_error_is_not_hidden(get_tcp_server, mocker):
+    client = MagicMock(spec=socket.socket)
+    mocker.patch.object(
+        get_tcp_server, "_process_request", side_effect=ValueError("bug")
+    )
+    with pytest.raises(ValueError, match="bug"):
+        get_tcp_server._handle_client(client, ("127.0.0.1", 1))
+    client.close.assert_called_once()
 
 
-@pytest.fixture
-def client_address() -> tuple[str, int]:
-    return "127.0.0.1", 54321
+def test_start_binds_listens_accepts_and_cleans_up(get_tcp_server, mocker):
+    get_tcp_server.server_socket.close()
+    listener = MagicMock(spec=socket.socket)
+    listener.getsockname.return_value = ("127.0.0.1", 8080)
+    client = MagicMock(spec=socket.socket)
+    listener.accept.side_effect = [(client, ("127.0.0.1", 54321)), KeyboardInterrupt()]
+    get_tcp_server.server_socket = listener
+    process = mocker.patch.object(get_tcp_server, "_process_request")
+    get_tcp_server.start()
+    listener.bind.assert_called_once_with(("127.0.0.1", 8080))
+    listener.listen.assert_called_once_with(TCPServer.BACKLOG)
+    assert get_tcp_server.ready.is_set()
+    process.assert_called_once_with(client, ("127.0.0.1", 54321))
+    assert not get_tcp_server._workers
+    assert not get_tcp_server._connections
+    listener.close.assert_called_once()
 
 
-@pytest.fixture
-def server_address() -> tuple[str, int]:
-    return "127.0.0.1", 8080
-
-
-class TestTCPServer:
-    def test_handle_client_closes_socket(
-        self,
-        get_tcp_server: TCPServer,
-        mock_client_socket: MagicMock,
-        client_address: tuple[str, int],
-        mocker: MockerFixture,
-    ):
-        mocker.patch.object(get_tcp_server, "_process_request")
-        get_tcp_server._handle_client(mock_client_socket, client_address)
-        mock_client_socket.close.assert_called_once()
-
-    def test_handle_client_closes_socket_after_connection_reset_error(
-        self,
-        get_tcp_server: TCPServer,
-        mock_client_socket: MagicMock,
-        client_address: tuple[str, int],
-        mocker: MockerFixture,
-    ):
-        mocker.patch.object(
-            get_tcp_server, "_process_request", side_effect=ConnectionResetError()
-        )
-        mock_logger: MagicMock = mocker.patch("app.tcp.server.logger")
-        get_tcp_server._handle_client(mock_client_socket, client_address)
-        mock_logger.warning.assert_called_once_with(
-            "Client %s:%s disconnected unexpectedly", *client_address
-        )
-        mock_client_socket.close.assert_called_once()
-
-    def test_handle_client_closes_socket_after_unicode_decode_error(
-        self,
-        get_tcp_server: TCPServer,
-        mock_client_socket: MagicMock,
-        client_address: tuple[str, int],
-        mocker: MockerFixture,
-    ):
-        mocker.patch.object(
-            get_tcp_server,
-            "_process_request",
-            side_effect=UnicodeDecodeError("utf-8", b"", 0, 1, "invalid byte"),
-        )
-        mock_logger: MagicMock = mocker.patch("app.tcp.server.logger")
-        get_tcp_server._handle_client(mock_client_socket, client_address)
-        mock_logger.error.assert_called_once_with(
-            "Failed to decode data from %s:%s", *client_address
-        )
-        mock_client_socket.close.assert_called_once()
-
-    def test_server_binds_correct_address(
-        self,
-        get_tcp_server: TCPServer,
-        mock_server_socket: MagicMock,
-        server_address: tuple[str, int],
-    ):
-        get_tcp_server.server_socket = mock_server_socket
-        mock_server_socket.accept.side_effect = KeyboardInterrupt()
+@pytest.mark.parametrize("operation", ["bind", "listen"])
+def test_start_failure_closes_listener(get_tcp_server, operation):
+    get_tcp_server.server_socket.close()
+    listener = MagicMock(spec=socket.socket)
+    getattr(listener, operation).side_effect = OSError("startup failure")
+    get_tcp_server.server_socket = listener
+    with pytest.raises(OSError, match="startup failure"):
         get_tcp_server.start()
-        mock_server_socket.bind.assert_called_once_with(server_address)
+    listener.close.assert_called_once()
+    assert not get_tcp_server.ready.is_set()
 
-    def test_server_listens_with_correct_backlog(
-        self,
-        get_tcp_server: TCPServer,
-        mock_server_socket: MagicMock,
-    ):
-        get_tcp_server.server_socket = mock_server_socket
-        mock_server_socket.accept.side_effect = KeyboardInterrupt()
-        get_tcp_server.start()
-        mock_server_socket.listen.assert_called_once_with(TCPServer.BACKLOG)
 
-    def test_server_logs_listening_address(
-        self,
-        get_tcp_server: TCPServer,
-        mock_server_socket: MagicMock,
-        server_address: tuple[str, int],
-        mocker: MockerFixture,
-    ):
-        get_tcp_server.server_socket = mock_server_socket
-        mock_logger = mocker.patch("app.tcp.server.logger")
-        mock_server_socket.accept.side_effect = KeyboardInterrupt()
-        get_tcp_server.start()
-        mock_logger.info.assert_any_call(
-            "The server is listening on: %s:%s", *server_address
-        )
-
-    def test_server_accepts_client_socket_and_address(
-        self,
-        started_server: TCPServer,
-        client_address: tuple[str, int],
-        mocker: MockerFixture,
-    ):
-        mock_logger: MagicMock = mocker.patch("app.tcp.server.logger")
-        started_server.start()
-        mock_logger.info.assert_any_call("New connection from %s:%s", *client_address)
-
-    def test_server_closes_socket_after_keyboard_interrupt(
-        self,
-        started_server: TCPServer,
-        mock_server_socket: MagicMock,
-    ):
-        started_server.start()
-        mock_server_socket.close.assert_called_once()
+def test_stop_is_safe_before_start_and_on_repeated_calls(get_tcp_server):
+    get_tcp_server.stop()
+    get_tcp_server.stop()
+    get_tcp_server.start()
+    assert get_tcp_server.server_socket.fileno() == -1
+    assert not get_tcp_server.ready.is_set()
